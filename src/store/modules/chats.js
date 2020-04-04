@@ -488,6 +488,7 @@ export default {
       const senderAddr = senderPubKey.toAddress('testnet').toCashAddress() // TODO: Make generic
       const myAddress = rootGetters['wallet/getMyAddressStr']
       const outbound = (senderAddr === myAddress)
+      const privKey = rootGetters['wallet/getIdentityPrivKey']
 
       const rawPayload = message.getSerializedPayload()
       const payloadDigest = message.getPayloadDigest()
@@ -655,37 +656,38 @@ export default {
           let entryData = entry.getEntryData()
           let stealthMessage = stealth.StealthPaymentEntry.deserializeBinary(entryData)
 
-          let electrumHandler = rootGetters['electrumHandler/getClient']
-
-          let txId = Buffer.from(stealthMessage.getTxId()).toString('hex')
-          try {
-            var txRaw = await electrumHandler.methods.blockchain_transaction_get(txId)
-          } catch (err) {
-            console.error(err)
-            // TODO: Awaiting confirmation check
-            // TODO: Logic relating to this
-          }
-          let tx = cashlib.Transaction(txRaw)
-
           // Add stealth output
-          let output = tx.outputs[0]
-          let address = output.script.toAddress('testnet').toLegacyAddress() // TODO: Make generic
-          let ephemeralPubKeyRaw = stealthMessage.getEphemeralPubKey()
-          const ephemeralPubKey = PublicKey(ephemeralPubKeyRaw)
-          const privKey = constructStealthPrivKey(ephemeralPubKey, identityPrivKey)
 
-          let stealthOutput = {
-            address,
-            outputIndex: 0, // TODO: 0 is always stealth output, change this assumption?
-            satoshis: output.satoshis,
-            txId,
-            type: 'stealth',
-            privKey
+          const outpointsList = stealthMessage.getOutpointsList()
+          let totalSatoshis = 0
+          for (const [outpointIndex, outpoint] of Object.entries(outpointsList)) {
+            const ephemeralPubKeyRaw = outpoint.getEphemeralPubKey()
+            const ephemeralPubKey = PublicKey.fromBuffer(ephemeralPubKeyRaw)
+            const stealthTxRaw = Buffer.from(outpoint.getStealthTx())
+            const stealthTx = cashlib.Transaction(stealthTxRaw)
+            const txId = stealthTx.hash
+            const vouts = outpoint.getVoutsList()
+            for (const vout of vouts) {
+              const output = tx.outputs[vout]
+              const satoshis = output.satoshis
+              const outputPrivKey = constructStealthPrivKey(ephemeralPubKey, identityPrivKey)
+
+              totalSatoshis += satoshis
+              const address = output.script.toAddress('testnet').toLegacyAddress() // TODO: Make generic
+              const stampOutput = {
+                address,
+                satoshis,
+                privKey: outputPrivKey,
+                txId,
+                type: 'stealth',
+                payloadDigest
+              }
+              dispatch('wallet/addUTXO', stampOutput, { root: true })
+            }
           }
-          dispatch('wallet/addUTXO', stealthOutput, { root: true })
           newMsg.items.push({
             type: 'stealth',
-            amount: output.satoshis
+            amount: totalSatoshis
           })
         } else if (kind === 'image') {
           let image = imageUtil.entryToImage(entry)
